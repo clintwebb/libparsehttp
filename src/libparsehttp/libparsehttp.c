@@ -1,6 +1,6 @@
 /*
 
-	liblinklist
+	libparsehttp
 	(c) Copyright Hyper-Active Systems, Australia
 
 	Contact:
@@ -10,7 +10,7 @@
 */
 
 
-#include "linklist.h"
+#include "parsehttp.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -19,567 +19,384 @@
 #include <unistd.h>
 
 
-#if (LIBLINKLIST_VERSION != 0x00008100)
-	#error "This version certified for v0.81 only"
+#if (LIBPARSEHTTP_VERSION != 0x00000500)
+	#error "This version certified for v0.05 only"
 #endif
 
+
+
 //-----------------------------------------------------------------------------
-// Initialise the list structure.  
-void ll_init(list_t *list)
+// initialize the structure.  if 'parse' parameter is null, then it will 
+// allocate memory and return it.  If 'parse' is not null, then it will 
+// initialise it as if it contains garbage information.  In otherwords, do not 
+// init an already initialised structure.   If you are supplying a parse 
+// parameter, you should use parse_version to ensure that the versions match 
+// or it is possible that memory bounds can be breached if the structure in 
+// the library is different to the header you are compiling against.
+parsehttp_t * parse_init(parsehttp_t *parse)
 {
-	assert(list);
+	parsehttp_t *p;
 	
-	list->head = NULL;
-	list->tail = NULL;
-	list->pool = NULL;
-	list->items = 0;
-	list->join = NULL;
-	list->loop = NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Free the resources created by the list.  At this point there should not be
-// any nodes in the list.  Will not free the actual list itself... as it could
-// have been malloc'd, or it could be embedded in another structure, or an
-// auto-var.
-void ll_free(list_t *list)
-{
-	_list_node_t *node, *tmp;
-	assert(list);
-
-	assert(list->head == NULL);
-	assert(list->tail == NULL);
-	assert(list->loop == NULL);
-
-	node = list->pool;
-	while (node) {
-		assert(node->data == NULL);
-		tmp = node;
-		node = node->next;
-		free(tmp);
-	}
-	list->pool = NULL;
-
-	if (list->join) {
-		free(list->join);
-		list->join = NULL;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Internal function to return a new node wrapper from the pool.  If there
-// isn't any left in the pool, then create a new node wrapper, and return that
-// instead.
-static _list_node_t * ll_new_node(list_t *list)
-{
-	_list_node_t *node;
-
-	assert(list);
-	
-	if (list->pool) {
-		// we have a node already available in the pool, so we will use that.
-		node = list->pool;
-		list->pool = node->next;
-		node->next = NULL;
+	if (parse == NULL) {
+		p = (parsehttp_t*) malloc(sizeof(parsehttp_t));
+		p->internally_created = 1;
 	}
 	else {
-		// There aren't anymore nodes in the pool, so we need to create one.
-		node = (_list_node_t *) malloc(sizeof(_list_node_t));
-		assert(node);
-		node->data = NULL;
-		node->next = NULL;
-		node->prev = NULL;
+		p = parse;
+		p->internally_created = 0;
+	}
+	
+	p->buffer = NULL;
+	p->length = 0;
+	p->pos = 0;
+	p->dataleft = 0;
+	p->state = state_request;
+	p->cb_method = NULL;
+	p->cb_path = NULL;
+	p->cb_params = NULL;
+	p->cb_version = NULL;
+	p->cb_header = NULL;
+	p->cb_formdata = NULL;
+	p->cb_cookie = NULL;
+	p->cb_host = NULL;
+	p->cb_datalength = NULL;
+	p->cb_data = NULL;
+	p->cb_complete = NULL;
+	p->arg = NULL;
+	
+	return(p);
+}
+
+
+//-----------------------------------------------------------------------------
+// Reset the parse object so it can be re-used by the same connection.  This is 
+// for cases where HTTP v1.1 is being used and multiple requests are received 
+// on the same socket connection.
+void parse_reset(parsehttp_t *parse)
+{
+	if (parse->buffer) {
+		free(parse->buffer);
+		parse->buffer = NULL;
+	}
+	parse->length = 0;
+	parse->pos = 0;
+	parse->dataleft = 0;
+	parse->state = state_request;	
+}
+
+//-----------------------------------------------------------------------------
+// Free the resources allocated.  If the object was created by the library then 
+// it will be freed here too.
+void parse_free(parsehttp_t *parse)
+{
+	assert(parse);
+	
+	if (parse->buffer) {
+		free(parse->buffer);
 	}
 
-	assert(node);
-	assert(node->data == NULL);
-	assert(node->prev == NULL);
-	assert(node->next == NULL);
-	return(node);
+	assert(parse->internally_created == 0 || parse->internally_created == 1);
+	if (parse->internally_created > 0) {
+		free(parse);
+	}
 }
 
+
 //-----------------------------------------------------------------------------
-// Internal function to return a node-wrapper back to the pool.
-static void ll_return_node(list_t *list, _list_node_t *node)
+// Return the version that this instance was compiled as.  A useful check to 
+// ensure that the header library that was compiled into other projects is the 
+// same as the one in the library.
+unsigned int parse_version(void)
 {
-	assert(list);
-	assert(node);
-
-	assert(node != list->tail);
-	assert(node != list->head);
-
-	assert(node->data == NULL);
-	assert(node->next == NULL);
-	assert(node->prev == NULL);
-
-	node->next = list->pool;
-	list->pool = node;
+	return(LIBPARSEHTTP_VERSION);
 }
 
+
 //-----------------------------------------------------------------------------
-// push an object to the head of the list.  Will add the data pointer to a
-// node-wrapper that contains all the actual list control mechanisms.
-void ll_push_head(list_t *list, void *data)
+// supply data that needs to be processed.  Will return 0 if all the expected 
+// data has been received.  If the user doesnt have the cb_complete callback 
+// set, this can be used to indicate that everything has been received and 
+// parsed.
+int parse_process(parsehttp_t *parse, char *data, int length)
 {
-	_list_node_t *node;
+	int expecting = 0;
 	
-	assert(list);
+	assert(parse);
 	assert(data);
+	assert(length > 0);
 
-	node = ll_new_node(list);
-	node->data = data;
-	assert(node->prev == NULL);
-	node->next = list->head;
-	if (node->next) node->next->prev = node;
-	list->head = node;
-	if (list->tail == NULL) list->tail = node;
-	list->items ++;
-}
+	assert(parse->state != state_done);
 
-//-----------------------------------------------------------------------------
-// same as ll_push_head, except pushing to the bottom of the list instead.
-void ll_push_tail(list_t *list, void *data)
-{
-	_list_node_t *node;
 	
-	assert(list);
-	assert(data);
+// 	printf("parse_process: start. length=%d\n", length);
 
-	node = ll_new_node(list);
-	node->data = data;
-	assert(node->next == NULL);
-	node->prev = list->tail;
-	if (node->prev) node->prev->next = node;
-	list->tail = node;
-	if (list->head == NULL) list->head = node;
-	list->items ++;
-}
-
-
-//-----------------------------------------------------------------------------
-// delete a particular node from the list.
-static void ll_delete_node(list_t *list, _list_node_t *node)
-{
-	assert(list);
-	assert(node);
-	assert(list->head);
-	assert(list->tail);
-
-	if (list->loop == node) {
-		list->loop = node->next;
-	}
-
-	assert(list->items > 0);
-	list->items --;
-	assert(list->items >= 0);
-
-	if (node->prev) node->prev->next = node->next;
-	if (node->next) node->next->prev = node->prev;
-	if (list->head == node) list->head = node->next;
-	if (list->tail == node) list->tail = node->prev;
-	node->prev = NULL;
-	node->next = NULL;
-	node->data = NULL;
-	ll_return_node(list, node);
-}
-
-
-
-
-//-----------------------------------------------------------------------------
-// return a pointer to the data object in the first entry in the list.  Does
-// not remove the entry from the list.  This is useful for examining an item
-// before determining to remove it.
-void * ll_get_head(list_t *list)
-{
-	void *data;
+	// we are processing data, and do not have a formdata callback, then we dont need to process it.
 	
-	assert(list);
-
-	if (list->head) {
-		assert(list->head->data);
-		return(list->head->data);
-	}
-	else {
-		return(NULL);
-	}
-}
-
-//-----------------------------------------------------------------------------
-// same as ll_get_head except it gets the node from the tail.
-void * ll_get_tail(list_t *list)
-{
-	assert(list);
-
-	if (list->tail) {
-		assert(list->tail->data);
-		return(list->tail->data);
-	}
-	else {
-		return(NULL);
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Pop an entry from the top of the list.  Which means that it returns the data
-// pointer if there is a node, and removes the node from the list.
-void * ll_pop_head(list_t *list)
-{
-	void *data;
-	_list_node_t *node;
-	
-	assert(list);
-
-	if (list->head) {
-		assert(list->head->data);
-		data = list->head->data;
-
-		assert(list->items > 0);
-		ll_delete_node(list, list->head);
-		assert(list->items >= 0);
-	}
-	else {
-		assert(list->items == 0);
-		data = NULL;
-	}
-	
-	return(data);
-}
-
-//-----------------------------------------------------------------------------
-// Same as ll_pop_head except pops from the bottom of the list.
-void * ll_pop_tail(list_t *list)
-{
-	void *data;
-	
-	assert(list);
-
-	if (list->tail) {
-		assert(list->tail->data);
-		data = list->tail->data;
-
-		assert(list->items > 0);
-		ll_delete_node(list, list->tail);
-		assert(list->items >= 0);
-	}
-	else {
-		assert(list->items == 0);
-		data = NULL;
-	}
-	
-	return(data);
-}
-
-
-//-----------------------------------------------------------------------------
-// Start the iterations through the list.  If there are no entries in the list,
-// will return NULL.
-void ll_start(list_t *list)
-{
-	assert(list);
-	assert(list->loop == NULL);
-	list->loop = list->head;
-}
-
-//-----------------------------------------------------------------------------
-// return the data pointer for the next node.
-void * ll_next(list_t *list)
-{
-	void *ptr;
-	
-	assert(list);
-
-	if (list->loop == NULL) {
-		return(NULL);
-	}
-	else {
-		ptr = list->loop->data;
-		assert(ptr);
-		list->loop = list->loop->next;
-		return(ptr);
-	}
-}
-
-//-----------------------------------------------------------------------------
-// This function is used to indicate that the iteration loop is finished.
-// Technically it is not necessary, but it allows us to assist developers in
-// finding obscure bugs in loops.  So if a loop is started, but not finished,
-// and another loop is started, then we generate an assertion.
-void ll_finish(list_t *list)
-{
-	assert(list);
-	list->loop = NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Remove a particular pointer from the list.  The 'next' is used to give a
-// hint to where in the list the item is (normally provided as part of
-// ll_start/ll_next).  If next is NULL, then the tail of the list is checked
-// first.
-void ll_remove(list_t *list, void *ptr)
-{
-	assert(list);
-	assert(ptr);
-
-	assert(list->head);
-	assert(list->tail);
-
-	// first check the 'next' hint that we were given.   It should be either
-	// pointing to the one we want, or pointing to the next one in the list from
-	// it.
-	if (list->loop) {
-		assert(list->loop->data);
-		if (list->loop->data == ptr) {
-			ll_delete_node(list, list->loop);
-			return;
-		}
-		else if (list->loop->prev) {
-			assert(list->loop->prev->data);
-			if (list->loop->prev->data == ptr) {
-				ll_delete_node(list, list->loop->prev);
-				return;
-			}
-		}
-	}
-
-	// we didn't have a hint 'loop' that told us where the entry was, so we need
-	// to go through the list.  We will start at the tail.
-	_list_node_t *node = list->tail;
-	while (node) {
-		assert(node->data);
-		if (node->data == ptr) {
-			assert(list->items > 0);
-			ll_delete_node(list, node);
-			assert(list->items >= 0);
-			return;
-		}
-		node = node->prev;
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Return the number of items in the list.
-int ll_count(list_t *list)
-{
-	assert(list);
-	assert(list->items >= 0);
-	return(list->items);
-}
-
-
-//-----------------------------------------------------------------------------
-// Assuming that the list contains valid strings, this function will join all
-// the elements in the list into a single string
-char * ll_join_str(list_t *list, const char *sep)
-{
-	int max;
-	int count;
-	char *str;
-	
-	assert(list);
-
-	// first go thru the list, and calculate the size of the resulting string.
-	max = 0;
-	count = 0;
-	ll_start(list);
-	while ((str = ll_next(list))) {
-		count ++;
-		max += strlen(str);
-	}
-	ll_finish(list);
-
-	if (sep && count > 1) {
-		max += (strlen(sep) * count);
-	}
-
-	// max now contains the size of the string we will be building.
-	list->join = (char *) realloc(list->join, max+1);
-	assert(list->join);
-	
-	// now build the list.
-	count = 0;
-	list->join[0] = '\0';
-	ll_start(list);
-	while ((str = ll_next(list))) {
-
-		// TODO: strcat is not very optimal way to do this.  We should keep track
-		// of the end of the string and add it direct to the end, but will bother
-		// with that another day.
-
-		if (count > 0 && sep != NULL) {
-			strcat(list->join, sep);
-		}
-		strcat(list->join, str);
-
-		count++;
-	}
-	ll_finish(list);
-
-// 	fprintf(stderr, "ll_join_str: len=%d, max=%d\n", strlen(list->join), max);
-	assert(strlen(list->join) <= max);
-
-	assert(list->join);
-	return(list->join);
-}
-
-
-//-----------------------------------------------------------------------------
-// move the entry to the head or tail of a list.  Most likely this would be
-// used while doing looping through the list.  Since the previous functionality
-// of going through the list would have removed the entry and then added it, we
-// will leave the 'next' pointer pointing to the next entry in the list before
-// the move took place.  This means that if you move an entry to the tail of
-// the list, it will likely get processed again if you continue the loop.
-void ll_move_head(list_t *list, void *ptr)
-{
-	_list_node_t *node;
-	assert(list);
-	assert(ptr);
-	assert(list->items > 0);
-
-	// start off with node pointing to NULL.
-	node = NULL;
-
-	// first we check to see if the 'loop' points us to the node we are looking
-	// for.  Either at the loop entry itself, or the previous one.
-	if (list->loop) {
-		assert(list->loop->data);
-		if (list->loop->data == ptr) {
-			node = list->loop;
-		}
-		else if (list->loop->prev) {
-			assert(list->loop->prev->data);
-			if (list->loop->prev->data == ptr) {
-				node = list->loop->prev;
-			}
-		}
-	}
-
-	// If we haven't already found the node we want, we need to go through the
-	// list.  We will start at the tail.
-	if (node == NULL) node = list->tail;
-
-	// at this point, we should definately have a node to look at.  We dont
-	// know if it is the correct one, but it is either the tail, or the one we
-	// are looking for... or possibly both.
-	assert(node);
-
-	// If we already found the node, then we will go right into this while loop,
-	// and hit straight away... otherwise we will loop through.  Code path is a
-	// little unclear, but it means that the actual guts of the thing is in one
-	// location.
-	while (node) {
-		assert(node->data);
-		if (node->data == ptr) {
-
-			// if the node we are looking for is already at the head of the list,
-			// we can effectively do nothing.
-			if (node != list->head) {
-
-				// if the node we are looking for is also listed as the next one in a
-				// loop, then we should move the 'loop' pointer to the next node in
-				// the list.
-				if (list->loop == node) {
-					list->loop = node->next;
-				}
-
-				// mvoe the pointers around so that the node is removed from where it
-				// is, and placed at the head of the list.
-				if (node->prev) node->prev->next = node->next;
-				if (node->next) node->next->prev = node->prev;
-				if (list->tail == node) list->tail = node->prev;
-				node->prev = NULL;
-				node->next = list->head;
-				if (node->next) node->next->prev = node;
-				list->head = node;
-				assert(list->tail);
-				assert(list->head);
-				assert(list->tail != list->head);
-			}
-			node = NULL;		
+	if (parse->state == state_data && parse->cb_formdata == NULL) {
+		
+		printf("parse_process: data mode, no callback. length=%d, left\n", length, parse->dataleft);
+		
+		// we call the cb_data callback with the new data after we determine how much data we have.
+		assert(length <= parse->dataleft);
+		parse->dataleft -= length;
+		assert(parse->dataleft >= 0);
+		parse->cb_data(data, length, parse->dataleft, parse->arg);
+		parse->pos += length;
+		assert(parse->pos > 0);
+		
+		assert(0);
+		
+		// determine if we are expecting any more data...
+		if (parse->dataleft == 0) {
+			if (parse->cb_complete) { parse->cb_complete(parse->arg); }
+			assert(expecting == 0);
 		}
 		else {
-			// we haven't yet found the node we are looking for, so we need to keep
-			// going up the list.
-			node = node->prev;
+			expecting = 1;	// we are expecting more data.
 		}
 	}
-}
+	else {
 
-void ll_move_tail(list_t *list, void *ptr)
-{
-	_list_node_t *node;
-	assert(list);
-	assert(ptr);
-	assert(list->items > 0);
 
-	// start off with node pointing to NULL.
-	node = NULL;
+		
+// 		printf("parse_process: Adding to existing buffer(%d). length=%d\n", parse->length, length);
+		
+		// we are still processing headers, then we need to just add the data and then try to process.
+		// add the new data to the existing buffer.
+		assert((parse->buffer == NULL && parse->length == 0) || (parse->buffer && parse->length > 0));
+		assert(length > 0);
+		parse->buffer = (char *) realloc(parse->buffer, parse->length + length + 1);
+		assert(parse->buffer);
+		memcpy(parse->buffer + parse->length, data, length);
+		parse->length += length;
+		parse->buffer[parse->length] = 0;
 
-	// first we check to see if the 'loop' points us to the node we are looking
-	// for.  Either at the loop entry itself, or the previous one.
-	if (list->loop) {
-		assert(list->loop->data);
-		if (list->loop->data == ptr) {
-			node = list->loop;
-		}
-		else if (list->loop->prev) {
-			assert(list->loop->prev->data);
-			if (list->loop->prev->data == ptr) {
-				node = list->loop->prev;
+		char *current;
+		char *next;
+		int len;
+		
+		assert(parse->pos >= 0 && parse->pos < length);
+		current = parse->buffer + parse->pos;
+		next = index(current, '\n');
+		while (next != NULL) {
+		
+			// get the length of the line we've found.
+			assert(next != current);
+			len = next - current;
+			assert(len > 0);
+
+			// next is pointing to the '\n' char... move it to the next one.
+			next ++;
+			
+			// if we found a line, we are going to process it, therefore we can increase our 'pos' value now.
+			parse->pos = next - parse->buffer;
+			assert(parse->pos <= parse->length);
+			
+			// turn the \n into a NULL to terminate the string.
+			current[len-1] = 0;
+			
+// 			printf("parse_process: loop. current='%s':%d, pos=%d, length=%d\n", current, len, parse->pos, parse->length);
+			
+			// trim the dos line feeds at the end if there are any.
+			while (len > 0 && current[len-1] == '\r') {
+				current[len-1] = 0;
+				len --;
 			}
-		}
-	}
+			
+			// trim the dos line feeds at the start if there are any.
+			while (current < next && *current == '\r') {
+				current ++;
+				len --;
+			}
 
-	// If we haven't already found the node we want, we need to go through the
-	// list.  We will start at the tail.
-	if (node == NULL) node = list->tail;
+// 			printf("parse_process: after trim. current='%s':%d, pos=%d, length=%d, state=%d\n", current, len, parse->pos, parse->length, parse->state);
 
-	// at this point, we should definately have a node to look at.  We dont
-	// know if it is the correct one, but it is either the tail, or the one we
-	// are looking for... or possibly both.
-	assert(node);
+			if (parse->state == state_request) {
+				printf("parse_process: processing request. current='%s':%d, pos=%d, length=%d\n", current, len, parse->pos, parse->length);
+	
+				char *word;
+				char *rest;
+				char *params;
+				
+				rest = current;					// start off at the begining of the string.
 
-	// If we already found the node, then we will go right into this while loop,
-	// and hit straight away... otherwise we will loop through.  Code path is a
-	// little unclear, but it means that the actual guts of the thing is in one
-	// location.
-	while (node) {
-		assert(node->data);
-		if (node->data == ptr) {
-
-			// if the node we are looking for is already at the head of the list,
-			// we can effectively do nothing.
-			if (node != list->tail) {
-
-				// if the node we are looking for is also listed as the next one in a
-				// loop, then we should move the 'loop' pointer to the next node in
-				// the list.
-				if (list->loop == node) {
-					list->loop = node->next;
+				// get the METHOD (GET, POST, HEAD, etc).
+				word = strsep(&rest, " ");		// pull out the first word.
+				assert(word);
+				if (parse->cb_method) { parse->cb_method(word, parse->arg); }
+					
+				// get the PATH
+				assert(rest);
+				word = strsep(&rest, " ");		// pull out the next word.
+				assert(word);
+				
+				// we have the path, but first we need to check that there are no params added to it.
+				params = index(word, '?');
+				if (params) {
+					*params = 0;
+					if (parse->cb_path) { parse->cb_path(word, parse->arg); }
+					if (parse->cb_params) { parse->cb_params(params, parse->arg); }
+					if (parse->cb_formdata) {
+						// need to seperate each form value.
+						assert(0);
+					}
+				}
+				else {
+					if (parse->cb_path) { parse->cb_path(word, parse->arg); }
 				}
 
-				// move the pointers around so that the node is removed from where it
-				// is, and placed at the tail of the list.
-				if (node->prev) node->prev->next = node->next;
-				if (node->next) node->next->prev = node->prev;
-				if (list->head == node) list->head = node->next;
-				node->next = NULL;
-				node->prev = list->tail;
-				if (node->prev) node->prev->next = node;
-				list->tail = node;
-				assert(list->tail);
-				assert(list->head);
-				assert(list->tail != list->head);
+				// get the version
+				word = strsep(&rest, " ");		// pull out the first word.
+				assert(word);
+				if (parse->cb_version) { parse->cb_version(word, parse->arg); }
+				
+				// change the state.
+				parse->state = state_headers;
 			}
-			node = NULL;		
+			else if (parse->state == state_headers && *current == 0) {
+				// we've reached the end of the headers.  
+				
+				printf("parse_process: end of headers.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
+				
+				// If we have content-length, then we need to set mode to Data, otherwise, we are done, and need to call the 'complete' callback.
+				if (parse->dataleft > 0) {
+					parse->state = state_data;
+					if (parse->cb_data) {
+						int l = parse->length - parse->pos;
+						assert(l <= parse->dataleft);
+						parse->cb_data(current, l, parse->dataleft - l, parse->arg);
+						parse->dataleft -= l;
+						printf("parse_process: AAA.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
+					}
+					else {
+						printf("no callback function cb_data set\n");
+					}
+					
+					// if cb_formdata is set, and we now have all the data, then we need to parse the data and get the formvalues out of it.
+					if (parse->cb_formdata) {
+						assert(0);
+					}
+					
+					assert(parse->dataleft >= 0);
+					if (parse->dataleft == 0) {
+						if (parse->cb_complete) { parse->cb_complete(parse->arg); }
+						parse->state = state_done;
+						expecting = 0;
+						printf("parse_process: BBB.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
+					}
+				}
+				else {
+					assert(parse->pos == parse->length);
+					if (parse->cb_complete) parse->cb_complete(parse->arg);
+					parse->state = state_done;
+					expecting = 0;
+					
+					printf("parse_process: CCC.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
+					
+				}
+			}
+			else if (parse->state == state_headers) {
+				
+				char *key;
+				char *value;
+				
+				key = current;
+// 				printf("header: len=%d\n", strlen(key));
+				
+				// first we clear off any spaces before the first :
+				// even though we are modifying 'value', we are actually affecting the end of 'key'.
+				value = index(current, ':');
+				value --;
+				while (value > key && (*value == ' ' || *value == '\t')) { *value = 0; value --; }
+				
+				value = index(current, ':');
+				*value = 0;
+				value++;
+				while (*value == ' ' || *value == '\t') { value ++; }
+				
+				printf("header: key='%s', value='%s'\n", key, value);
+				
+				// call the callback routine
+				if (parse->cb_header) { parse->cb_header(key, value, parse->arg); }
+					
+				// ... look for the content-length and set the dataleft and call the callback if it is set.
+				if (strcasecmp(key, "content-length") == 0) {
+					assert(parse->dataleft == 0);
+					parse->dataleft = atoi(value);
+					if (parse->cb_datalength) { parse->cb_datalength(parse->dataleft, parse->arg); }
+				}
+				else if (parse->cb_host && strcasecmp(key, "host") == 0) {
+					// the host value can contain the port also... so we need to look for that.
+					char *port = index(value, ':');
+					int portnum = 0;
+					
+					if (port) {
+						*port = 0;
+						port++;
+						portnum = atoi(port);
+					}
+
+					parse->cb_host(value, portnum, parse->arg);
+				}
+			}
+			else if (parse->state < state_data) {
+				// look at our state to see what we are looking for.
+				assert(0);
+				
+			}
+			else {
+				// if we are in 'data' mode, then we need to load in all the data and then parse it, calling callback routines.
+				assert(0);
+			}
+			
+			// find the next '\n' in the stream.
+			if (parse->pos >= parse->length) {
+				next = NULL;
+			}
+			else {
+// 				assert(0);
+				current = next;
+				next = index(current, '\n');
+			}
 		}
-		else {
-			// we haven't yet found the node we are looking for, so we need to keep
-			// going up the list.
-			node = node->prev;
+
+		// if the content-length was zero, and we have finished with headers, then we are not expecting any more.
+	}
+	
+	assert((expecting == 0 && parse->state == state_done) || (expecting == 1 && parse->state < state_done));
+	return(expecting);
+}
+
+
+//-----------------------------------------------------------------------------
+// given a string containing the parameters, this function will split it into 
+// key/value pairs and call the callback routine.
+void parse_params(char *params, void (*handler)(const char *key, const char *value, void *arg), void *arg)
+{
+	char *next;
+	char *key;
+	char *value;
+	
+	assert(params);
+	assert(handler);
+	
+	next = params;
+	while (next) {
+		key = next;
+		value = index(next, '=');
+		if (value) {
+			*value = 0;
+			value++;
+			next = index(value, '&');
+			if (next) {
+				*next = 0;
+				next++;
+			}
+			
+			handler(key, value, arg);
 		}
+		else { next = NULL; }
 	}
 }
+
 

@@ -1,9 +1,9 @@
 ## make file for libparsehttp
 
 MAINFILE=libparsehttp.so
-LIBVER=1.0.3
+LIBVER=1.0.1
 LIBFILE=$(MAINFILE).$(LIBVER)
-SONAME=$(MAINFILE).3
+SONAME=$(MAINFILE).1
 
 MANPATH=/usr/local/man
 

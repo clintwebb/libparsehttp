@@ -1,75 +1,109 @@
 /*
 
-	liblinklist
+	libparsehttp
 	(c) Copyright Hyper-Active Systems, Australia
 
 	Contact:
 		Clinton Webb
 		webb.clint@gmail.com
 
-	This is a small, simplistic library designed to handle a linked list of generic objects.
+	This library is intended to be used to parse http headers and content so 
+	that an application can become a webserver if it wants.  It does not 
+	handle any socket or IO, it merely takes chunks 
 
 	It is released under GPL v2 or later license.  Details are included in the LICENSE file.
 
 */
 
-#ifndef __LINKLIST_H
-#define __LINKLIST_H
+#ifndef __PARSEHTTP_H
+#define __PARSEHTTP_H
 
 
-#define LIBLINKLIST_VERSION 0x00008100
-#define LIBLINKLIST_VERSION_TEXT "v0.81"
+#define LIBPARSEHTTP_VERSION 0x00000500
+#define LIBPARSEHTTP_VERSION_TEXT "v0.05"
 
 
-typedef struct __llist {
-	void *data;
-	struct __llist *prev, *next;
-} _list_node_t;
 
 typedef struct {
-	_list_node_t *head;
-	_list_node_t *tail;
-	_list_node_t *pool;
-	int items;
-	char *join;
-	_list_node_t *loop;
-} list_t;
+	char *buffer;
+	int length;
+	int pos;
+	int dataleft;
+	
+	enum {
+		state_request,
+		state_headers,
+		state_data,
+		state_done
+	} state;
+	
+	void (*cb_method)(const char *method, void *arg);
+	void (*cb_path)(const char *path, void *arg);
+	void (*cb_params)(const char *params, void *arg);
+	void (*cb_version)(const char *version, void *arg);
+	void (*cb_header)(const char *key, const char *value, void *arg);
+	void (*cb_formdata)(const char *key, const char *value, void *arg);
+	void (*cb_cookie)(const char *key, const char *value, void *arg);
+	void (*cb_host)(const char *host, int port, void *arg);
+	void (*cb_datalength)(int length, void *arg);
+	void (*cb_data)(const char *data, int length, int leftover, void *arg);
+	void (*cb_complete)(void *arg);
+	
+	void *arg;
+	
+	short int internally_created;
+} parsehttp_t;
 
-// initializing and de-initializing of the list.
-void ll_init(list_t *list);
-void ll_free(list_t *list);
 
-// adding data to the list.
-void ll_push_head(list_t *list, void *data);
-void ll_push_tail(list_t *list, void *data);
+// initialize the structure.  if 'parse' parameter is null, then it will 
+// allocate memory and return it.  If 'parse' is not null, then it will 
+// initialise it as if it contains garbage information.  In otherwords, do not 
+// init an already initialised structure.   If you are supplying a parse 
+// parameter, you should use parse_version to ensure that the versions match 
+// or it is possible that memory bounds can be breached if the structure in 
+// the library is different to the header you are compiling against.
+parsehttp_t * parse_init(parsehttp_t *parse);
 
-// getting and removing data from the list.
-void * ll_pop_head(list_t *list);
-void * ll_pop_tail(list_t *list);
+// free the resources used by the instance.  If the object was created 
+// internally then it will also free the parse object itself.
+void parse_free(parsehttp_t *parse);
 
-// getting data from the list without removing.
-void * ll_get_head(list_t *list);
-void * ll_get_tail(list_t *list);
+// Return the version that this instance was compiled as.  A useful check to 
+// ensure that the header library that was compiled into other projects is the 
+// same as the one in the library.
+unsigned int parse_version(void);
 
-// Methods to iterate throught the list.
-void ll_start(list_t *list);
-void * ll_next(list_t *list);
-void ll_remove(list_t *list, void *ptr);
-void ll_finish(list_t *list);
 
-// statistics of the linked list.
-int ll_count(list_t *list);
+// Reset the parse object so it can be re-used by the same connection.  This is 
+// for cases where HTTP v1.1 is being used and multiple requests are received 
+// on the same socket connection.
+void parse_reset(parsehttp_t *parse);
 
-// create a string of all the entries in the list, seperated by the 'sep' string.
-char * ll_join_str(list_t *list, const char *sep);
 
-// move the entry to the head or tail of a list.  Most likely this would be
-// used while doing looping through the list.  Since the previous functionality
-// of going through the list would have removed the entry and then added it, we
-// will leave the 'next' pointer pointing to the next entry in the list before
-// the move took place.  This means that if you move an entry to the tail of
-// the list, it will likely get processed again if you continue the loop.
-void ll_move_head(list_t *list, void *ptr);
-void ll_move_tail(list_t *list, void *ptr);
+// supply data that needs to be processed.  Will return 0 if all the expected 
+// data has been received.  If the user doesnt have the cb_complete callback 
+// set, this can be used to indicate that everything has been received and 
+// parsed.
+int parse_process(parsehttp_t *parse, char *data, int length);
+
+// set the user argument.
+#define parse_setarg(p,a) {assert(p); assert((p)->arg==NULL); (p)->arg=(a);}
+
+// set callbacks for the various parsing options.
+#define parse_setcb_method(p,fn)     {assert(p); assert((p)->cb_method==NULL);     (p)->cb_method=(fn);}
+#define parse_setcb_path(p,fn)       {assert(p); assert((p)->cb_path==NULL);       (p)->cb_path=(fn);}
+#define parse_setcb_params(p,fn)     {assert(p); assert((p)->cb_params==NULL);     (p)->cb_params=(fn);}
+#define parse_setcb_version(p,fn)    {assert(p); assert((p)->cb_version==NULL);    (p)->cb_version=(fn);}
+#define parse_setcb_header(p,fn)     {assert(p); assert((p)->cb_header==NULL);     (p)->cb_header=(fn);}
+#define parse_setcb_formdata(p,fn)   {assert(p); assert((p)->cb_formdata==NULL);   (p)->cb_formdata=(fn);}
+#define parse_setcb_cookie(p,fn)     {assert(p); assert((p)->cb_cookie==NULL);     (p)->cb_cookie=(fn);}
+#define parse_setcb_host(p,fn)       {assert(p); assert((p)->cb_host==NULL);       (p)->cb_host=(fn);}
+#define parse_setcb_datalength(p,fn) {assert(p); assert((p)->cb_datalength==NULL); (p)->cb_datalength=(fn);}
+#define parse_setcb_data(p,fn)       {assert(p); assert((p)->cb_data==NULL);       (p)->cb_data=(fn);}
+#define parse_setcb_complete(p,fn)   {assert(p); assert((p)->cb_complete==NULL);   (p)->cb_complete=(fn);}
+
+
+// given a string containing the parameters, this function will split it into key/value pairs and call the callback routine.
+void parse_params(char *params, void (*handler)(const char *key, const char *value, void *arg), void *arg);
 
 #endif
