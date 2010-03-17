@@ -127,14 +127,9 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 
 	assert(parse->state != state_done);
 
-	
-// 	printf("parse_process: start. length=%d\n", length);
-
 	// we are processing data, and do not have a formdata callback, then we dont need to process it.
 	
 	if (parse->state == state_data && parse->cb_formdata == NULL) {
-		
-		printf("parse_process: data mode, no callback. length=%d, left\n", length, parse->dataleft);
 		
 		// we call the cb_data callback with the new data after we determine how much data we have.
 		assert(length <= parse->dataleft);
@@ -157,10 +152,6 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 	}
 	else {
 
-
-		
-// 		printf("parse_process: Adding to existing buffer(%d). length=%d\n", parse->length, length);
-		
 		// we are still processing headers, then we need to just add the data and then try to process.
 		// add the new data to the existing buffer.
 		assert((parse->buffer == NULL && parse->length == 0) || (parse->buffer && parse->length > 0));
@@ -195,8 +186,6 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 			// turn the \n into a NULL to terminate the string.
 			current[len-1] = 0;
 			
-// 			printf("parse_process: loop. current='%s':%d, pos=%d, length=%d\n", current, len, parse->pos, parse->length);
-			
 			// trim the dos line feeds at the end if there are any.
 			while (len > 0 && current[len-1] == '\r') {
 				current[len-1] = 0;
@@ -209,11 +198,7 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 				len --;
 			}
 
-// 			printf("parse_process: after trim. current='%s':%d, pos=%d, length=%d, state=%d\n", current, len, parse->pos, parse->length, parse->state);
-
 			if (parse->state == state_request) {
-				printf("parse_process: processing request. current='%s':%d, pos=%d, length=%d\n", current, len, parse->pos, parse->length);
-	
 				char *word;
 				char *rest;
 				char *params;
@@ -234,6 +219,8 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 				params = index(word, '?');
 				if (params) {
 					*params = 0;
+					params++;
+					assert(*params != 0);
 					if (parse->cb_path) { parse->cb_path(word, parse->arg); }
 					if (parse->cb_params) { parse->cb_params(params, parse->arg); }
 					if (parse->cb_formdata) {
@@ -255,21 +242,15 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 			}
 			else if (parse->state == state_headers && *current == 0) {
 				// we've reached the end of the headers.  
-				
-				printf("parse_process: end of headers.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
-				
+
 				// If we have content-length, then we need to set mode to Data, otherwise, we are done, and need to call the 'complete' callback.
 				if (parse->dataleft > 0) {
 					parse->state = state_data;
 					if (parse->cb_data) {
 						int l = parse->length - parse->pos;
 						assert(l <= parse->dataleft);
-						parse->cb_data(current, l, parse->dataleft - l, parse->arg);
+						parse->cb_data(next, l, parse->dataleft - l, parse->arg);
 						parse->dataleft -= l;
-						printf("parse_process: AAA.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
-					}
-					else {
-						printf("no callback function cb_data set\n");
 					}
 					
 					// if cb_formdata is set, and we now have all the data, then we need to parse the data and get the formvalues out of it.
@@ -282,7 +263,6 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 						if (parse->cb_complete) { parse->cb_complete(parse->arg); }
 						parse->state = state_done;
 						expecting = 0;
-						printf("parse_process: BBB.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
 					}
 				}
 				else {
@@ -290,9 +270,6 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 					if (parse->cb_complete) parse->cb_complete(parse->arg);
 					parse->state = state_done;
 					expecting = 0;
-					
-					printf("parse_process: CCC.  length=%d, pos=%d, dataleft=%d\n", parse->length, parse->pos, parse->dataleft);
-					
 				}
 			}
 			else if (parse->state == state_headers) {
@@ -301,7 +278,6 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 				char *value;
 				
 				key = current;
-// 				printf("header: len=%d\n", strlen(key));
 				
 				// first we clear off any spaces before the first :
 				// even though we are modifying 'value', we are actually affecting the end of 'key'.
@@ -313,8 +289,6 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 				*value = 0;
 				value++;
 				while (*value == ' ' || *value == '\t') { value ++; }
-				
-				printf("header: key='%s', value='%s'\n", key, value);
 				
 				// call the callback routine
 				if (parse->cb_header) { parse->cb_header(key, value, parse->arg); }
