@@ -135,16 +135,16 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 		assert(length <= parse->dataleft);
 		parse->dataleft -= length;
 		assert(parse->dataleft >= 0);
+		assert(parse->cb_data);
 		parse->cb_data(data, length, parse->dataleft, parse->arg);
 		parse->pos += length;
 		assert(parse->pos > 0);
-		
-		assert(0);
 		
 		// determine if we are expecting any more data...
 		if (parse->dataleft == 0) {
 			if (parse->cb_complete) { parse->cb_complete(parse->arg); }
 			assert(expecting == 0);
+			parse->state = state_done;
 		}
 		else {
 			expecting = 1;	// we are expecting more data.
@@ -177,6 +177,7 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 			assert(len > 0);
 
 			// next is pointing to the '\n' char... move it to the next one.
+			assert(*next == '\n');
 			next ++;
 			
 			// if we found a line, we are going to process it, therefore we can increase our 'pos' value now.
@@ -184,16 +185,19 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 			assert(parse->pos <= parse->length);
 			
 			// turn the \n into a NULL to terminate the string.
-			current[len-1] = 0;
+			assert(current[len] == '\n');
+			current[len] = 0;
 			
 			// trim the dos line feeds at the end if there are any.
-			while (len > 0 && current[len-1] == '\r') {
+			assert(len > 0);
+			if (current[len-1] == '\r') {
 				current[len-1] = 0;
 				len --;
 			}
 			
 			// trim the dos line feeds at the start if there are any.
-			while (current < next && *current == '\r') {
+			assert(current < next);
+			if (*current == '\r') {
 				current ++;
 				len --;
 			}
@@ -262,14 +266,17 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 					if (parse->dataleft == 0) {
 						if (parse->cb_complete) { parse->cb_complete(parse->arg); }
 						parse->state = state_done;
-						expecting = 0;
+						assert(expecting == 0);
+					}
+					else {
+						expecting = 1;
 					}
 				}
 				else {
 					assert(parse->pos == parse->length);
 					if (parse->cb_complete) parse->cb_complete(parse->arg);
 					parse->state = state_done;
-					expecting = 0;
+					assert(expecting == 0);
 				}
 			}
 			else if (parse->state == state_headers) {
@@ -337,7 +344,7 @@ int parse_process(parsehttp_t *parse, char *data, int length)
 		// if the content-length was zero, and we have finished with headers, then we are not expecting any more.
 	}
 	
-	assert((expecting == 0 && parse->state == state_done) || (expecting == 1 && parse->state < state_done));
+	assert((expecting == 0 && parse->state == state_done && parse->dataleft == 0) || (expecting == 1 && parse->state < state_done));
 	return(expecting);
 }
 
