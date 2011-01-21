@@ -19,8 +19,8 @@
 #include <unistd.h>
 
 
-#if (LIBPARSEHTTP_VERSION != 0x00000500)
-	#error "This version certified for v0.05 only"
+#if (LIBPARSEHTTP_VERSION != 0x00000600)
+	#error "This version certified for v0.06 only"
 #endif
 
 
