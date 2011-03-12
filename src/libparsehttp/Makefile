@@ -1,11 +1,16 @@
 ## make file for libparsehttp
 
-MAINFILE=libparsehttp.so
+PROJECT=libparsehttp
+OBJFILE=$(PROJECT).o
+MAINFILE=$(PROJECT).so
 LIBVER=1.0.1
 LIBFILE=$(MAINFILE).$(LIBVER)
 SONAME=$(MAINFILE).1
 
-MANPATH=/usr/local/man
+DESTDIR=
+INCDIR=$(DESTDIR)/usr/include
+LIBDIR=$(DESTDIR)/usr/lib
+MANDIR=$(DESTDIR)/usr/share/man
 
 
 all: $(LIBFILE)
@@ -13,42 +18,40 @@ all: $(LIBFILE)
 
 LIBS=
 ARGS=
-REQH=
 
 
 
-libparsehttp.o: libparsehttp.c parsehttp.h $(REQH)
+$(OBJFILE): libparsehttp.c parsehttp.h
 	gcc -c -fPIC libparsehttp.c -o $@ $(ARGS)
 
-libparsehttp.a: libparsehttp.o
+$(PROJECT).a: $(OBJFILE)
 	@>$@
 	@rm $@
 	ar rcs $@ $^
 
-$(LIBFILE): libparsehttp.o
+$(LIBFILE): $(OBJFILE)
 	gcc -shared -Wl,-soname,$(SONAME) -o $@ $^
 
 
-lib-test: lib-test.c $(REQH) /usr/include/parsehttp.h
-	gcc lib-test.c -o $@ -lparsehttp
+install_dev: parsehttp.h 
+	cp parsehttp.h $(INCDIR)/
 
-install: $(LIBFILE) parsehttp.h 
-	cp parsehttp.h /usr/include/
-	cp $(LIBFILE) /usr/lib/
-	@-test -e /usr/lib/$(MAINFILE) && rm /usr/lib/$(MAINFILE)
-	ln -s /usr/lib/$(LIBFILE) /usr/lib/$(MAINFILE)
-	nice ldconfig
-	@echo "Install complete."
 
-manpages: man/libparsehttp.3 man/ll_free.3 man/ll_get_head.3 man/ll_get_tail.3 man/ll_init.3 man/ll_pop_head.3 man/ll_pop_tail.3 man/ll_push_head.3 man/ll_push_tail.3 man/ll_count.3 man/ll_join_str.3 man/ll_move_head.3 man/ll_move_tail.3
+install: $(LIBFILE)
+	cp $(LIBFILE) $(LIBDIR)/
+	@-test -e $(LIBDIR)/$(MAINFILE) && rm $(LIBDIR)/$(MAINFILE)
+	ln -s $(LIBDIR)/$(LIBFILE) $(LIBDIR)/$(MAINFILE)
+
+
+manpages: man/libparsehttp.3 
 	@mkdir tmp.install
 	@cp man/* tmp.install/
 	@gzip tmp.install/*.3
-	cp tmp.install/*.3.gz $(MANPATH)/man3/
+	cp tmp.install/*.3.gz $(MANDIR)/man3/
 	@rm -r tmp.install
 
 
 clean:
-	@-rm libparsehttp.o
+	@-rm $(OBJFILE)
 	@-rm libparsehttp.so*
 
