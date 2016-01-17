@@ -34,16 +34,19 @@ $(LIBFILE): $(OBJFILE)
 
 
 install_dev: parsehttp.h 
+	@-test -d $(INCDIR) || mkdir -p $(INCDIR)
 	cp parsehttp.h $(INCDIR)/
 
 
 install: $(LIBFILE)
+	@-test -d $(LIBDIR) || mkdir -p $(LIBDIR)
 	cp $(LIBFILE) $(LIBDIR)/
 	@-test -e $(LIBDIR)/$(MAINFILE) && rm $(LIBDIR)/$(MAINFILE)
 	ln -s $(LIBDIR)/$(LIBFILE) $(LIBDIR)/$(MAINFILE)
 
 
 manpages: man/libparsehttp.3 
+	@-test -d $(MANDIR) || mkdir -p $(MANDIR)
 	@mkdir tmp.install
 	@cp man/* tmp.install/
 	@gzip tmp.install/*.3
